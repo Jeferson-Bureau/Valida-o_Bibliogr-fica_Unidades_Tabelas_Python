@@ -250,6 +250,10 @@ def _apply_all(text: str) -> str:
     for u_suffix in ["m","g","L","s","mol"]:
         text = re.sub(rf'(\d){re.escape(MU)}{re.escape(u_suffix)}', r'\1 ' + MU + u_suffix, text)
 
+    # H3. Força de centrifugação / aceleração relativa (g): '2,000×g' -> '2,000 × g'
+    #   Trata multiplicações com x, X, × seguidos da unidade g
+    text = re.sub(r'(\d[\d.,]*)\s*[xX\u00D7]\s*g\b', r'\1 ' + "\u00D7" + ' g', text)
+
     # ──────────────────────────────────────────────────────────────────────────
     # BLOCO I — Operadores matemáticos (espaço antes e depois)
     # Aplica apenas quando o operador está entre caracteres no mesmo run.
