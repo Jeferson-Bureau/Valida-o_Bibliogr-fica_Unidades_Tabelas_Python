@@ -1,0 +1,8 @@
+requests
+pydantic
+unidecode
+rich
+python-docx
+textual
+pyperclip
+
