@@ -265,6 +265,9 @@ def _apply_all(text: str) -> str:
         # Espaceja entre caracteres e operador
         text = re.sub(rf'(\S)\s*{e}\s*(\S)', lambda m: f'{m.group(1)} {op} {m.group(2)}', text)
         
+        # Espaceja operador quando no início ou precedido por pontuação/espaço (ex: "±1" -> "± 1")
+        text = re.sub(rf'(^|[\s\(\[\{{\'\"]){e}\s*(\d)', lambda m: f'{m.group(1)}{op} {m.group(2)}', text)
+
         # Remove o espaço IMEDIATAMENTE após parêntese ou colchete de abertura (ex: "( > " -> "(>")
         text = text.replace(f"( {op} ", f"({op} ")
         text = text.replace(f"[ {op} ", f"[{op} ")
