@@ -152,9 +152,9 @@ def _apply_all(text: str) -> str:
     # F3. Restaurar °C
     text = text.replace(f"{PH_DEG}C", f"{DEG}C")
 
-    # F4. Celsius: remover espaço entre número e °C
-    #   Correto: 37°C    Incorreto: 37 °C
-    text = re.sub(r'(\d)\s+' + re.escape(DEG) + r'C', lambda m: m.group(1) + DEG + 'C', text)
+    # F4. Celsius: remover espaço entre número e °C ou ° C
+    #   Correto: 37°C    Incorreto: 37 °C, 37 ° C, 37 ºC
+    text = re.sub(r'(\d)\s*' + re.escape(DEG) + r'\s*C\b', lambda m: m.group(1) + DEG + 'C', text)
 
     # ──────────────────────────────────────────────────────────────────────────
     # BLOCO G — Unidades compostas (barra → expoente negativo)
