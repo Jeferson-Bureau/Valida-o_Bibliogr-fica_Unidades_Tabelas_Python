@@ -262,12 +262,8 @@ def _apply_all(text: str) -> str:
     OPERATORS = ["=", "<", ">", "±", "~", "≤", "≥", "≠", "≈"]
     for op in OPERATORS:
         e = re.escape(op)
-        # Só espaceja se houver pelo menos um caractere não-espaço em cada lado
-        text = re.sub(rf'(\S)\s*{e}\s*(\S)', lambda m: f'{m.group(1)} {op} {m.group(2)}', text)
-        
-        # Remove espaços ao redor do operador se estiver após parêntese/colchete aberto (ex: "( < " -> "(<")
-        text = text.replace(f"( {op} ", f"({op}")
-        text = text.replace(f"[ {op} ", f"[{op}")
+        # Espaceja entre qualquer caractere (incluindo parênteses e colchetes) e o operador
+        text = re.sub(rf'([\w([%])\s*{e}\s*([\w)\]%])', lambda m: f'{m.group(1)} {op} {m.group(2)}', text)
 
     text = re.sub(r'  +', ' ', text)
 
