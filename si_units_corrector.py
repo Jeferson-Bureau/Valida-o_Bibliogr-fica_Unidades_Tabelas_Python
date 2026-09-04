@@ -2,12 +2,6 @@
 si_units_corrector.py — Corretor de Unidades Científicas para Python/python-docx
 Porta da Macro VBA "Sistema Internacional de Unidades" v2.1
 Normas: APA 7ª Edição + Sistema Internacional de Unidades (SI / BIPM)
-
-Estratégia:
-  - Processa runs individuais para substituições simples.
-  - Para padrões que cruzam runs (ex: número em um run, unidade em outro),
-    reconstrói o texto do parágrafo, aplica e redistribui no primeiro run.
-  - Protege parágrafos após o título "Referências" (qualquer grafia).
 """
 
 import re
@@ -30,12 +24,147 @@ SM3   = "\u207B\u00B3" # ⁻³
 SUP2  = "\u00B2"       # ²
 SUP3  = "\u00B3"       # ³
 SUPn  = "\u207F"       # ⁿ
+SUB0  = "\u2080"       # ₀
+SUPf  = "\u1DA0"       # ᶠ
 NBSP  = "\u00A0"       # espaço não quebrável
 PH_DEG = "\uE000"      # placeholder PUA para °C durante bloco F
+PRIME  = "\u2032"      # ′ minuto
+DPRIME = "\u2033"      # ″ segundo
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Lista de unidades SI simples (para bloco H: espaçamento número-unidade)
+# Compilação de Expressões Regulares e Mapas
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Bloco A - Micro (ASCII u -> μ)
+PAIRS_MICRO_RE = [
+    (re.compile(r'(\d)\s?um\b'),   rf'\1 {MU}m'),
+    (re.compile(r'(\d)\s?ug\b'),   rf'\1 {MU}g'),
+    (re.compile(r'(\d)\s?uL\b'),   rf'\1 {MU}L'),
+    (re.compile(r'(\d)\s?us\b'),   rf'\1 {MU}s'),
+    (re.compile(r'(\d)\s?umol\b'), rf'\1 {MU}mol'),
+]
+
+# Bloco B - Plurais indevidos
+PLURAL_MAP = {
+    "kgs":"kg","mgs":"mg","ngs":"ng","kms":"km","cms":"cm","mms":"mm","nms":"nm",
+    "mLs":"mL","dLs":"dL","mins":"min",
+    "kHzs":"kHz","MHzs":"MHz","GHzs":"GHz",
+    "kPas":"kPa","MPas":"MPa","GPas":"GPa",
+    "kNs":"kN","MNs":"MN","kJs":"kJ","MJs":"MJ","kWs":"kW","MWs":"MW",
+    "mVs":"mV","kVs":"kV","mAs":"mA",
+    "mols":"mol","mmols":"mmol","atms":"atm","Torrs":"Torr","mTs":"mT",
+}
+# Regex única para encontrar as chaves
+PLURAL_RE = re.compile(r'\b(' + '|'.join(re.escape(k) for k in PLURAL_MAP.keys()) + r')\b')
+
+# Bloco C - Prefixos soltos (ex: "k m" -> "km")
+PREFIX_PAIRS = {
+    "k m":"km","k g":"kg","k Hz":"kHz","k Pa":"kPa","k N":"kN",
+    "k J":"kJ","k W":"kW","k V":"kV",
+    "M Hz":"MHz","M Pa":"MPa","M N":"MN","M J":"MJ","M W":"MW","M V":"MV",
+    "G Hz":"GHz","G Pa":"GPa",
+    "m m":"mm","m L":"mL","m V":"mV","m A":"mA","m T":"mT",
+    "m mol":"mmol","m g":"mg",
+    "n m":"nm","n g":"ng","n s":"ns",
+    f"{MU} m":f"{MU}m",f"{MU} g":f"{MU}g",f"{MU} L":f"{MU}L",
+    f"{MU} s":f"{MU}s",f"{MU} mol":f"{MU}mol",
+}
+PREFIX_RE = re.compile(r'(\d)\s?(' + '|'.join(re.escape(k) for k in PREFIX_PAIRS.keys()) + r')')
+def _prefix_sub(match):
+    return f"{match.group(1)} {PREFIX_PAIRS[match.group(2)]}"
+
+# Bloco G - Unidades Compostas
+COMPOUND_MAP_LIST = [
+    # Massa/volume
+    (f"{MU}g/mL",  f"{MU}g mL{SM1}"), (f"{MU}g/dL",  f"{MU}g dL{SM1}"),
+    (f"{MU}g/L",   f"{MU}g L{SM1}"),   (f"{MU}g/g",   f"{MU}g g{SM1}"),
+    (f"{MU}g/100 g", f"{MU}g 100g{SM1}"), (f"{MU}g/100g", f"{MU}g 100g{SM1}"),
+    ("ng/mL",  f"ng mL{SM1}"),  ("ng/L",  f"ng L{SM1}"),
+    ("mg/mL",  f"mg mL{SM1}"),  ("mg/dL", f"mg dL{SM1}"),
+    ("mg/ml",  f"mg mL{SM1}"),  ("mg/dl", f"mg dL{SM1}"),
+    ("mg/L",   f"mg L{SM1}"),   ("mg/kg", f"mg kg{SM1}"),
+    ("U/mL",   f"U mL{SM1}"),   ("U/ml",  f"U mL{SM1}"),
+    ("U/mg",   f"U mg{SM1}"),
+    ("10n/q",  f"10{SUPn} q{SM1}"),
+    ("mg/100 g",f"mg 100g{SM1}"), ("mg/100g",f"mg 100g{SM1}"),
+    ("g/mL",   f"g mL{SM1}"),   ("g/dL",  f"g dL{SM1}"),
+    ("g/L",    f"g L{SM1}"),    ("g/kg",  f"g kg{SM1}"),
+    
+    # Substância/volume
+    (f"{MU}mol/L",  f"{MU}mol L{SM1}"),
+    ("nmol/L", f"nmol L{SM1}"),
+    ("mmol/mL",f"mmol mL{SM1}"),("mmol/L", f"mmol L{SM1}"),
+    ("mol/mL", f"mol mL{SM1}"), ("mol/L",  f"mol L{SM1}"),
+    (f"mol/m{SUP3}",f"mol m{SM3}"), ("mol/m3", f"mol m{SM3}"),
+    
+    # Velocidade / aceleração
+    (f"m/s{SUP2}", f"m s{SM2}"), ("m/s2", f"m s{SM2}"),
+    ("km/h",  f"km h{SM1}"),  ("km/s", f"km s{SM1}"),
+    ("m/s",   f"m s{SM1}"),
+    
+    # Força / pressão / energia / potência
+    (f"N/m{SUP2}", f"N m{SM2}"), ("N/m2", f"N m{SM2}"),
+    (f"W/m{SUP2}", f"W m{SM2}"), ("W/m2", f"W m{SM2}"),
+    ("N/m",   f"N m{SM1}"),   ("Pa/m",  f"Pa m{SM1}"),
+    ("kJ/mol/nm", f"kJ mol{SM1} nm{SM1}"),
+    ("J/mol", f"J mol{SM1}"), ("J/kg",  f"J kg{SM1}"),
+    ("J/g",   f"J g{SM1}"),   ("W/kg",  f"W kg{SM1}"),
+    ("Kcal/g", f"Kcal g{SM1}"),
+    
+    # Densidade / Massa por área
+    (f"kg/m{SUP3}", f"kg m{SM3}"), ("kg/m3", f"kg m{SM3}"),
+    (f"kg/m{SUP2}", f"kg m{SM2}"), ("kg/m2", f"kg m{SM2}"),
+    (f"g/cm{SUP3}", f"g cm{SM3}"), ("g/cm3", f"g cm{SM3}"),
+    
+    # Fluxo / débito
+    ("mL/min",f"mL min{SM1}"),("L/min", f"L min{SM1}"),
+    ("mL/h",  f"mL h{SM1}"),  ("L/h",   f"L h{SM1}"),
+    ("mL/kg", f"mL kg{SM1}"), ("L/kg",  f"L kg{SM1}"),
+    ("min/day",f"min day{SM1}"),("min/dia",f"min dia{SM1}"),
+    ("min/d", f"min d{SM1}"),
+    
+    # Compostos / antioxidantes
+    ("GAE/kg",  f"GAE kg{SM1}"),  ("GAE/g",    f"GAE g{SM1}"),
+    ("GAE/100 g",f"GAE 100g{SM1}"),("GAE/100g",f"GAE 100g{SM1}"),
+    ("QE/100 g",f"QE 100g{SM1}"), ("QE/100g",  f"QE 100g{SM1}"),
+    ("TEAC/100 g",f"TEAC 100g{SM1}"),("TEAC/100g",f"TEAC 100g{SM1}"),
+    ("catechins/100 g",f"catechins 100g{SM1}"),("catechins/100g",f"catechins 100g{SM1}"),
+    ("Trolox/kg",f"Trolox kg{SM1}"),
+    ("ug/g",  f"{MU}g g{SM1}"),
+    ("ug/L",  f"{MU}g L{SM1}"),  ("ug/mL", f"{MU}g mL{SM1}"),
+    ("ug/100 g",f"{MU}g 100g{SM1}"),("ug/100g",f"{MU}g 100g{SM1}"),
+    
+    # Microbiologia: CFU/UFC
+    ("CFU/mL",  f"UFC mL{SM1}"),  ("CFU/ml",  f"UFC mL{SM1}"),
+    ("CFU/L",   f"UFC L{SM1}"),
+    ("CFU/g",   f"UFC g{SM1}"),
+    (f"CFU/cm{SUP2}", f"UFC cm{SM2}"), ("CFU/cm2", f"UFC cm{SM2}"),
+    (f"CFU/m{SUP2}",  f"UFC m{SM2}"),  ("CFU/m2",  f"UFC m{SM2}"),
+    ("CFU/mL/h",f"UFC mL{SM1} h{SM1}"),
+    ("UFC/mL",  f"UFC mL{SM1}"),  ("UFC/ml",  f"UFC mL{SM1}"),
+    ("UFC/L",   f"UFC L{SM1}"),
+    ("UFC/g",   f"UFC g{SM1}"),
+    (f"UFC/cm{SUP2}", f"UFC cm{SM2}"), ("UFC/cm2", f"UFC cm{SM2}"),
+    (f"UFC/m{SUP2}",  f"UFC m{SM2}"),  ("UFC/m2",  f"UFC m{SM2}"),
+    
+    # Temperatura / taxa
+    (f"{DEG}C/min", f"{DEG}C min{SM1}"),
+
+    # Novas regras solicitadas
+    (f"{MU}g/ml", f"{MU}g ml{SM1}"),
+    (f"{MU}g h/ml", f"{MU}g h ml{SM1}"),
+    ("pg/ml", f"pg ml{SM1}"),
+    (f"{MU}mol/g", f"{MU}mol g{SM1}"),
+    ("IU/L", f"IU L{SM1}"),
+]
+
+# Compila um dicionário e regex otimizada para substituição múltipla (O(1))
+# As chaves maiores primeiro para evitar problemas de substring (e.g. kJ/mol vs kJ/mol/nm)
+COMPOUND_MAP_LIST.sort(key=lambda x: len(x[0]), reverse=True)
+COMPOUND_MAP = {wrong: correct for wrong, correct in COMPOUND_MAP_LIST}
+COMPOUND_RE = re.compile('(' + '|'.join(re.escape(k) for k in COMPOUND_MAP.keys()) + ')')
+
+# Lista de unidades SI simples para bloco H
 SI_UNITS = {
     "kg","g","mg","ng","pg","t",
     "km","m","cm","mm","nm","pm",
@@ -53,242 +182,108 @@ SI_UNITS = {
     "bar","atm","mmHg","Torr",
     "h","min","s","ms","ns","ps",
     "K",
-    # micro (Unicode)
     f"{MU}m",f"{MU}g",f"{MU}L",f"{MU}s",f"{MU}mol",
 }
+# Número seguido de unidade sem espaço
+UNIT_RE = re.compile(r'(\d)(' + '|'.join(re.escape(u) for u in sorted(SI_UNITS, key=len, reverse=True)) + r')(?=\s|$|[,;.)\]])')
+MU_UNITS_RE = re.compile(r'(\d)' + re.escape(MU) + r'(m|g|L|s|mol)')
+CENTRIFUGE_RE = re.compile(r'(\d[\d.,]*)\s*[xX\u00D7]\s*g\b')
 
-# Constrói regex para bloco H (número imediatamente seguido de unidade sem espaço)
-_unit_re = re.compile(
-    r'(\d)(' + '|'.join(re.escape(u) for u in sorted(SI_UNITS, key=len, reverse=True)) + r')(?=\s|$|[,;.)\]])',
-)
+# Outras Expressões regulares comuns
+OHM_RE = re.compile(r'(?i) ohm\b')
+MULTI_SPACE_RE = re.compile(r'  +')
+PERCENT_RE = re.compile(r'(\d)\s+%')
+DEG_SPACE_RE = re.compile(r'(\d)\s' + re.escape(DEG))
+PRIME_SPACE_RE = re.compile(r'(\d)\s' + re.escape(PRIME))
+DPRIME_SPACE_RE = re.compile(r'(\d)\s' + re.escape(DPRIME))
+CELSIUS_RE = re.compile(r'(\d)\s*' + re.escape(DEG) + r'\s*C\b')
+M_M_RE = re.compile(r'\bm/m\b')
+P_P0_RE = re.compile(r'\bP\s*/\s*P0\b')
+PUNCT_RE = re.compile(r' ([.,;:])')
 
+OPERATORS = ["=", "<", ">", "±", "~", "≤", "≥", "≠", "≈"]
+OPERATOR_CHARS = set(OPERATORS)
+# Pré-compilação para espaçamento de operadores
+OP_SPACING_RE1 = []
+OP_SPACING_RE2 = []
+for op in OPERATORS:
+    e = re.escape(op)
+    OP_SPACING_RE1.append((re.compile(rf'(\S)\s*{e}\s*(\S)'), op))
+    OP_SPACING_RE2.append((re.compile(rf'(^|[\s\(\[\{{\'\"]){e}\s*(\d)'), op))
 
 def _apply_all(text: str) -> str:
     """Aplica todas as substituições de texto a uma string."""
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO A — Pré-limpeza e normalização de símbolos
-    # ──────────────────────────────────────────────────────────────────────────
-    # A1. Espaço não quebrável → espaço comum
+    
+    # Bloco A — Pré-limpeza
     text = text.replace(NBSP, " ")
-
-    # A2. Ordinal "º" → símbolo de grau "°" apenas antes de C
+    text = text.replace("\u00B5", MU)  # Normaliza U+00B5 (Micro Sign) para U+03BC (Greek Mu)
     text = text.replace(f"{ORD}C", f"{DEG}C")
-
-    # A3. Operadores full-width → ASCII
     text = text.replace("\uFF1D", "=").replace("\uFF1C", "<").replace("\uFF1E", ">")
-
-    # A4. Ohm por extenso
-    text = re.sub(r'(?i) ohm\b', f' {OHM}', text)
+    
+    text = OHM_RE.sub(f' {OHM}', text)
     text = text.replace(f"kO", f"k{OHM}").replace(f"MO", f"M{OHM}").replace(f"GO", f"G{OHM}")
 
-    # A5. "u" ASCII → μ (micro SI) quando precedido de número
-    pairs_micro = [
-        (r'(\d)\s?um\b',   r'\1 ' + MU + 'm'),
-        (r'(\d)\s?ug\b',   r'\1 ' + MU + 'g'),
-        (r'(\d)\s?uL\b',   r'\1 ' + MU + 'L'),
-        (r'(\d)\s?us\b',   r'\1 ' + MU + 's'),
-        (r'(\d)\s?umol\b', r'\1 ' + MU + 'mol'),
-    ]
-    for pat, rep in pairs_micro:
-        text = re.sub(pat, rep, text)
+    for pat_re, rep in PAIRS_MICRO_RE:
+        text = pat_re.sub(rep, text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO B — Plurais indevidos em símbolos de unidades
-    # ──────────────────────────────────────────────────────────────────────────
-    plural_map = {
-        "kgs":"kg","mgs":"mg","ngs":"ng","kms":"km","cms":"cm","mms":"mm","nms":"nm",
-        "mLs":"mL","dLs":"dL","mins":"min",
-        "kHzs":"kHz","MHzs":"MHz","GHzs":"GHz",
-        "kPas":"kPa","MPas":"MPa","GPas":"GPa",
-        "kNs":"kN","MNs":"MN","kJs":"kJ","MJs":"MJ","kWs":"kW","MWs":"MW",
-        "mVs":"mV","kVs":"kV","mAs":"mA",
-        "mols":"mol","mmols":"mmol","atms":"atm","Torrs":"Torr","mTs":"mT",
-    }
-    for wrong, correct in plural_map.items():
-        text = re.sub(rf'\b{re.escape(wrong)}\b', correct, text)
+    # Bloco B — Plurais indevidos
+    text = PLURAL_RE.sub(lambda m: PLURAL_MAP[m.group(1)], text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO C — Prefixos soltos (ex: "k m" → "km")
-    # ──────────────────────────────────────────────────────────────────────────
-    prefix_pairs = [
-        ("k m","km"),("k g","kg"),("k Hz","kHz"),("k Pa","kPa"),("k N","kN"),
-        ("k J","kJ"),("k W","kW"),("k V","kV"),
-        ("M Hz","MHz"),("M Pa","MPa"),("M N","MN"),("M J","MJ"),("M W","MW"),("M V","MV"),
-        ("G Hz","GHz"),("G Pa","GPa"),
-        ("m m","mm"),("m L","mL"),("m V","mV"),("m A","mA"),("m T","mT"),
-        ("m mol","mmol"),("m g","mg"),
-        ("n m","nm"),("n g","ng"),("n s","ns"),
-        (f"{MU} m",f"{MU}m"),(f"{MU} g",f"{MU}g"),(f"{MU} L",f"{MU}L"),
-        (f"{MU} s",f"{MU}s"),(f"{MU} mol",f"{MU}mol"),
-    ]
-    for wrong, correct in prefix_pairs:
-        text = re.sub(rf'(\d)\s?{re.escape(wrong)}', r'\1 ' + correct, text)
+    # Bloco C — Prefixos soltos
+    text = PREFIX_RE.sub(_prefix_sub, text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO D — Espaços múltiplos
-    # ──────────────────────────────────────────────────────────────────────────
-    text = re.sub(r'  +', ' ', text)
+    # Bloco D — Espaços múltiplos
+    text = MULTI_SPACE_RE.sub(' ', text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO E — Porcentagem (sem espaço antes de %)
-    #   Correto: 45%    Incorreto: 45 %
-    # ──────────────────────────────────────────────────────────────────────────
-    text = re.sub(r'(\d)\s+%', r'\1%', text)
+    # Bloco E — Porcentagem
+    text = PERCENT_RE.sub(r'\1%', text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO F — Temperatura e ângulos
-    # ──────────────────────────────────────────────────────────────────────────
-    # F1. Proteger °C com placeholder
+    # Bloco F — Temperatura e ângulos
     text = text.replace(f"{DEG}C", f"{PH_DEG}C")
-
-    # F2. Ângulos: remover espaço antes de °, ′, ″
-    PRIME  = "\u2032"  # ′ minuto
-    DPRIME = "\u2033"  # ″ segundo
-    text = re.sub(r'(\d)\s' + re.escape(DEG),    lambda m: m.group(1) + DEG,    text)
-    text = re.sub(r'(\d)\s' + re.escape(PRIME),  lambda m: m.group(1) + PRIME,  text)
-    text = re.sub(r'(\d)\s' + re.escape(DPRIME), lambda m: m.group(1) + DPRIME, text)
-
-    # F3. Restaurar °C
+    text = DEG_SPACE_RE.sub(lambda m: m.group(1) + DEG, text)
+    text = PRIME_SPACE_RE.sub(lambda m: m.group(1) + PRIME, text)
+    text = DPRIME_SPACE_RE.sub(lambda m: m.group(1) + DPRIME, text)
     text = text.replace(f"{PH_DEG}C", f"{DEG}C")
+    text = CELSIUS_RE.sub(lambda m: m.group(1) + DEG + 'C', text)
 
-    # F4. Celsius: remover espaço entre número e °C ou ° C
-    #   Correto: 37°C    Incorreto: 37 °C, 37 ° C, 37 ºC
-    text = re.sub(r'(\d)\s*' + re.escape(DEG) + r'\s*C\b', lambda m: m.group(1) + DEG + 'C', text)
+    # Bloco G — Unidades compostas (barra → expoente negativo)
+    text = COMPOUND_RE.sub(lambda m: COMPOUND_MAP[m.group(1)], text)
+    text = M_M_RE.sub(f'm m{SM1}', text)
+    text = P_P0_RE.sub(f'P P{SUB0}{SM1}', text)
+    text = text.replace(f"Ca/Si{SUPf}", f"Ca Si{SUPf}{SM1}").replace(f"Sn/Si{SUPf}", f"Sn Si{SUPf}{SM1}")
+    text = text.replace("Ca/Sif", f"Ca Si{SUPf}{SM1}").replace("Sn/Sif", f"Sn Si{SUPf}{SM1}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO G — Unidades compostas (barra → expoente negativo)
-    # ──────────────────────────────────────────────────────────────────────────
-    compound_map = [
-        # Massa/volume
-        (f"{MU}g/mL",  f"{MU}g mL{SM1}"), (f"{MU}g/dL",  f"{MU}g dL{SM1}"),
-        (f"{MU}g/L",   f"{MU}g L{SM1}"),   (f"{MU}g/g",   f"{MU}g g{SM1}"),
-        (f"{MU}g/100 g", f"{MU}g 100g{SM1}"), (f"{MU}g/100g", f"{MU}g 100g{SM1}"),
-        ("ng/mL",  f"ng mL{SM1}"),  ("ng/L",  f"ng L{SM1}"),
-        ("mg/mL",  f"mg mL{SM1}"),  ("mg/dL", f"mg dL{SM1}"),
-        ("mg/ml",  f"mg mL{SM1}"),  ("mg/dl", f"mg dL{SM1}"),
-        ("mg/L",   f"mg L{SM1}"),   ("mg/kg", f"mg kg{SM1}"),
-        ("U/mL",   f"U mL{SM1}"),   ("U/ml",  f"U mL{SM1}"),
-        ("U/mg",   f"U mg{SM1}"),
-        ("10n/q",  f"10{SUPn} q{SM1}"),
-        ("mg/100 g",f"mg 100g{SM1}"), ("mg/100g",f"mg 100g{SM1}"),
-        ("g/mL",   f"g mL{SM1}"),   ("g/dL",  f"g dL{SM1}"),
-        ("g/L",    f"g L{SM1}"),    ("g/kg",  f"g kg{SM1}"),
-        # Substância/volume
-        (f"{MU}mol/L",  f"{MU}mol L{SM1}"),
-        ("nmol/L", f"nmol L{SM1}"),
-        ("mmol/mL",f"mmol mL{SM1}"),("mmol/L", f"mmol L{SM1}"),
-        ("mol/mL", f"mol mL{SM1}"), ("mol/L",  f"mol L{SM1}"),
-        (f"mol/m{SUP3}",f"mol m{SM3}"), ("mol/m3", f"mol m{SM3}"),
-        # Velocidade / aceleração
-        (f"m/s{SUP2}", f"m s{SM2}"), ("m/s2", f"m s{SM2}"),
-        ("km/h",  f"km h{SM1}"),  ("km/s", f"km s{SM1}"),
-        ("m/s",   f"m s{SM1}"),
-        # Força / pressão / energia / potência
-        (f"N/m{SUP2}", f"N m{SM2}"), ("N/m2", f"N m{SM2}"),
-        (f"W/m{SUP2}", f"W m{SM2}"), ("W/m2", f"W m{SM2}"),
-        ("N/m",   f"N m{SM1}"),   ("Pa/m",  f"Pa m{SM1}"),
-        ("kJ/mol/nm", f"kJ mol{SM1} nm{SM1}"),
-        ("J/mol", f"J mol{SM1}"), ("J/kg",  f"J kg{SM1}"),
-        ("J/g",   f"J g{SM1}"),   ("W/kg",  f"W kg{SM1}"),
-        ("Kcal/g", f"Kcal g{SM1}"),
-        # Densidade / Massa por área
-        (f"kg/m{SUP3}", f"kg m{SM3}"), ("kg/m3", f"kg m{SM3}"),
-        (f"kg/m{SUP2}", f"kg m{SM2}"), ("kg/m2", f"kg m{SM2}"),
-        (f"g/cm{SUP3}", f"g cm{SM3}"), ("g/cm3", f"g cm{SM3}"),
-        # Fluxo / débito
-        ("mL/min",f"mL min{SM1}"),("L/min", f"L min{SM1}"),
-        ("mL/h",  f"mL h{SM1}"),  ("L/h",   f"L h{SM1}"),
-        ("mL/kg", f"mL kg{SM1}"), ("L/kg",  f"L kg{SM1}"),
-        ("min/day",f"min day{SM1}"),("min/dia",f"min dia{SM1}"),
-        ("min/d", f"min d{SM1}"),
-        # Compostos / antioxidantes (case-insensitive tratado abaixo)
-        ("GAE/kg",  f"GAE kg{SM1}"),  ("GAE/g",    f"GAE g{SM1}"),
-        ("GAE/100 g",f"GAE 100g{SM1}"),("GAE/100g",f"GAE 100g{SM1}"),
-        ("QE/100 g",f"QE 100g{SM1}"), ("QE/100g",  f"QE 100g{SM1}"),
-        ("TEAC/100 g",f"TEAC 100g{SM1}"),("TEAC/100g",f"TEAC 100g{SM1}"),
-        ("catechins/100 g",f"catechins 100g{SM1}"),("catechins/100g",f"catechins 100g{SM1}"),
-        ("Trolox/kg",f"Trolox kg{SM1}"),
-        ("ug/g",  f"{MU}g g{SM1}"),
-        ("ug/L",  f"{MU}g L{SM1}"),  ("ug/mL", f"{MU}g mL{SM1}"),
-        ("ug/100 g",f"{MU}g 100g{SM1}"),("ug/100g",f"{MU}g 100g{SM1}"),
-        # Microbiologia: CFU (Colony Forming Units) → UFC mL⁻¹ etc.
-        # Variações com CFU (inglês) → UFC (português) + expoente negativo
-        ("CFU/mL",  f"UFC mL{SM1}"),  ("CFU/ml",  f"UFC mL{SM1}"),
-        ("CFU/L",   f"UFC L{SM1}"),
-        ("CFU/g",   f"UFC g{SM1}"),
-        (f"CFU/cm{SUP2}", f"UFC cm{SM2}"), ("CFU/cm2", f"UFC cm{SM2}"),
-        (f"CFU/m{SUP2}",  f"UFC m{SM2}"),  ("CFU/m2",  f"UFC m{SM2}"),
-        ("CFU/mL/h",f"UFC mL{SM1} h{SM1}"),
-        # Variações com UFC (já em português, mas com barra)
-        ("UFC/mL",  f"UFC mL{SM1}"),  ("UFC/ml",  f"UFC mL{SM1}"),
-        ("UFC/L",   f"UFC L{SM1}"),
-        ("UFC/g",   f"UFC g{SM1}"),
-        (f"UFC/cm{SUP2}", f"UFC cm{SM2}"), ("UFC/cm2", f"UFC cm{SM2}"),
-        (f"UFC/m{SUP2}",  f"UFC m{SM2}"),  ("UFC/m2",  f"UFC m{SM2}"),
-        # Temperatura / taxa
-        (f"{DEG}C/min", f"{DEG}C min{SM1}"),
-    ]
-    for wrong, correct in compound_map:
-        text = text.replace(wrong, correct)
-
-    # G1b. m/m com regex (word boundary evita falsos positivos em cm/min etc.)
-    text = re.sub(r'\bm/m\b', f'm m{SM1}', text)
-
-    # G2. Pontos de produto → espaço
     for dot in ["\u00B7", "\u22C5", "\u2219", "\u2022"]:
         text = text.replace(dot, " ")
 
-    text = re.sub(r'  +', ' ', text)
+    text = MULTI_SPACE_RE.sub(' ', text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO H — Espaço entre número e unidade SI
-    # ──────────────────────────────────────────────────────────────────────────
-    text = _unit_re.sub(r'\1 \2', text)
+    # Bloco H — Espaço entre número e unidade SI
+    text = UNIT_RE.sub(r'\1 \2', text)
+    text = MU_UNITS_RE.sub(r'\1 ' + MU + r'\2', text)
+    text = CENTRIFUGE_RE.sub(r'\1 ' + "\u00D7" + ' g', text)
 
-    # H2. Unidades com μ (Unicode)
-    for u_suffix in ["m","g","L","s","mol"]:
-        text = re.sub(rf'(\d){re.escape(MU)}{re.escape(u_suffix)}', r'\1 ' + MU + u_suffix, text)
-
-    # H3. Força de centrifugação / aceleração relativa (g): '2,000×g' -> '2,000 × g'
-    #   Trata multiplicações com x, X, × seguidos da unidade g
-    text = re.sub(r'(\d[\d.,]*)\s*[xX\u00D7]\s*g\b', r'\1 ' + "\u00D7" + ' g', text)
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO I — Operadores matemáticos (espaço antes e depois)
-    # Aplica apenas quando o operador está entre caracteres no mesmo run.
-    # O caso cross-run (± em run separado) é tratado por _fix_cross_run_operators.
-    # ──────────────────────────────────────────────────────────────────────────
-    OPERATORS = ["=", "<", ">", "±", "~", "≤", "≥", "≠", "≈"]
+    # Bloco I — Operadores matemáticos
+    for pat_re, op in OP_SPACING_RE1:
+        text = pat_re.sub(lambda m, o=op: f'{m.group(1)} {o} {m.group(2)}', text)
+    for pat_re, op in OP_SPACING_RE2:
+        text = pat_re.sub(lambda m, o=op: f'{m.group(1)}{o} {m.group(2)}', text)
+    
     for op in OPERATORS:
-        e = re.escape(op)
-        # Espaceja entre caracteres e operador
-        text = re.sub(rf'(\S)\s*{e}\s*(\S)', lambda m: f'{m.group(1)} {op} {m.group(2)}', text)
-        
-        # Espaceja operador quando no início ou precedido por pontuação/espaço (ex: "±1" -> "± 1")
-        text = re.sub(rf'(^|[\s\(\[\{{\'\"]){e}\s*(\d)', lambda m: f'{m.group(1)}{op} {m.group(2)}', text)
-
-        # Remove o espaço IMEDIATAMENTE após parêntese ou colchete de abertura (ex: "( > " -> "(>")
         text = text.replace(f"( {op} ", f"({op} ")
         text = text.replace(f"[ {op} ", f"[{op} ")
 
-    text = re.sub(r'  +', ' ', text)
+    text = MULTI_SPACE_RE.sub(' ', text)
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # BLOCO J — Limpeza final de pontuação
-    # ──────────────────────────────────────────────────────────────────────────
-    text = re.sub(r' ([.,;:])', r'\1', text)
-    # Nota: NÃO aplicar strip() aqui — runs isolados com operadores (ex: '±')
-    # precisam dos espaços nas bordas para separar do run vizinho.
+    # Bloco J — Limpeza final de pontuação
+    text = PUNCT_RE.sub(r'\1', text)
 
     return text
-
 
 def _is_references_heading(para: Paragraph) -> bool:
     """Retorna True se o parágrafo for o título da seção Referências."""
     text = para.text.strip()
     return bool(re.fullmatch(r'refer[eê]ncias?', text, re.IGNORECASE))
-
 
 def _process_run(run: Run) -> None:
     """Aplica correções ao texto de um único run."""
@@ -299,17 +294,10 @@ def _process_run(run: Run) -> None:
     if corrected != original:
         run.text = corrected
 
-
-OPERATOR_CHARS = {"±", "=", "<", ">", "~", "≤", "≥", "≠", "≈"}
-
-
 def _fix_cross_run_operators(para: Paragraph) -> None:
     """
     Garante espaço antes/depois de operadores matemáticos que estão
     em runs separados dos números ao redor.
-
-    Abordagem: insere exatamente UM espaço no final do run anterior
-    e UM espaço no início do run seguinte, sem duplicar.
     """
     runs = para.runs
     for i, run in enumerate(runs):
@@ -317,34 +305,25 @@ def _fix_cross_run_operators(para: Paragraph) -> None:
         if not txt:
             continue
 
-        # Verifica se este run contém algum operador
         contains_op = any(op in txt for op in OPERATOR_CHARS)
         if not contains_op:
             continue
 
-        # Garante exatamente 1 espaço no final do run anterior
         if i > 0:
             prev = runs[i - 1]
             if prev.text and not prev.text.endswith(" "):
                 prev.text = prev.text + " "
 
-        # Garante exatamente 1 espaço no início do run seguinte
         if i < len(runs) - 1:
             nxt = runs[i + 1]
             if nxt.text and not nxt.text.startswith(" "):
                 nxt.text = " " + nxt.text
 
-        # Remove espaços nas bordas do run do operador (evita duplo espaço
-        # quando o Bloco I já adicionou espaços internos como " ± "):
-        # o espaçamento fica exclusivamente nos runs vizinhos.
         run.text = txt.strip()
-
 
 def _merge_split_compound_units(para: Paragraph) -> None:
     """
-    No Word, expoentes formatados (ex: 'kg/m' normal e '2' sobrescrito) ficam em runs separados.
-    Isso impede que o _apply_all identifique a unidade inteira.
-    Esta função funde o expoente no run da base antes do processamento.
+    Funde o expoente no run da base antes do processamento (ex: 'kg/m' e '2').
     """
     for i in range(len(para.runs) - 1):
         r1 = para.runs[i]
@@ -359,7 +338,6 @@ def _merge_split_compound_units(para: Paragraph) -> None:
                 exp = match.group(2)
                 r1.text = r1.text + spaces + exp
                 r2.text = r2.text[len(spaces) + 1:]
-
 
 def _fix_cross_run_spacing(para: Paragraph) -> None:
     """
@@ -380,18 +358,10 @@ def _fix_cross_run_spacing(para: Paragraph) -> None:
                 r1.text = t1
                 r2.text = t2
 
-
 def _fix_cross_run_compounds(para: Paragraph) -> None:
     """
-    Aplica substituições de unidades compostas (compound_map) ao nível do
+    Aplica substituições de unidades compostas ao nível do
     parágrafo inteiro, resolvendo padrões que ficaram divididos entre runs.
-
-    Estratégia:
-      1. Concatena o texto de todos os runs.
-      2. Aplica as mesmas substituições do compound_map.
-      3. Se houve alteração, redistribui o texto corrigido nos runs,
-         preservando os limites originais de caracteres (e portanto a
-         formatação de cada run).
     """
     runs = para.runs
     if not runs:
@@ -400,24 +370,17 @@ def _fix_cross_run_compounds(para: Paragraph) -> None:
     full_text = "".join(r.text or "" for r in runs)
     corrected = full_text
 
-    # Aplica compound_map (mesma lista do _apply_all Bloco G)
-    compound_map = [
-        # Padrões com múltiplas barras (devem vir primeiro)
-        ("kJ/mol/nm", f"kJ mol{SM1} nm{SM1}"),
-        ("CFU/mL/h", f"UFC mL{SM1} h{SM1}"),
-        # Temperatura / taxa
-        (f"{DEG}C/min", f"{DEG}C min{SM1}"),
-    ]
-    for wrong, correct in compound_map:
-        corrected = corrected.replace(wrong, correct)
-    # m/m com regex (word boundary evita falsos positivos)
-    corrected = re.sub(r'\bm/m\b', f'm m{SM1}', corrected)
+    # Aplica as mesmas substituições de compostos (via Regex)
+    corrected = corrected.replace("\u00B5", MU) # Garante que run merges cruzados também estejam normalizados
+    corrected = COMPOUND_RE.sub(lambda m: COMPOUND_MAP[m.group(1)], corrected)
+    corrected = M_M_RE.sub(f'm m{SM1}', corrected)
+    corrected = P_P0_RE.sub(f'P P{SUB0}{SM1}', corrected)
+    corrected = corrected.replace(f"Ca/Si{SUPf}", f"Ca Si{SUPf}{SM1}").replace(f"Sn/Si{SUPf}", f"Sn Si{SUPf}{SM1}")
+    corrected = corrected.replace("Ca/Sif", f"Ca Si{SUPf}{SM1}").replace("Sn/Sif", f"Sn Si{SUPf}{SM1}")
 
     if corrected == full_text:
         return
 
-    # Redistribui o texto corrigido respeitando os limites dos runs
-    # Quando o texto encolhe/cresce, o excedente é absorvido pelo último run
     pos = 0
     for i, run in enumerate(runs):
         orig_len = len(run.text or "")
@@ -425,40 +388,27 @@ def _fix_cross_run_compounds(para: Paragraph) -> None:
             run.text = corrected[pos:pos + orig_len]
             pos += orig_len
         else:
-            # Último run recebe o restante
             run.text = corrected[pos:]
-
 
 def _process_paragraph(para: Paragraph) -> None:
     """Processa todos os runs de um parágrafo."""
-    # 0ª passagem: fundir unidades compostas que foram divididas por formatação
     _merge_split_compound_units(para)
-    
-    # 1ª passagem: substituições run a run
     for run in para.runs:
         _process_run(run)
-    # 1.5ª passagem: unidades compostas que cruzam runs
     _fix_cross_run_compounds(para)
-    # 2ª passagem: espaçamento cross-run para operadores em runs separados
     _fix_cross_run_operators(para)
-    # 3ª passagem: espaçamento cross-run para % e °C colados no número
     _fix_cross_run_spacing(para)
-    # 4ª passagem: colapsar espaços duplos que possam surgir nas bordas dos runs
     for run in para.runs:
         if run.text and "  " in run.text:
-            run.text = re.sub(r"  +", " ", run.text)
-
+            run.text = MULTI_SPACE_RE.sub(" ", run.text)
 
 def correct_si_units(doc: Document) -> int:
     """
     Aplica todas as correções de unidades SI ao documento.
-    Para quando encontra a seção "Referências" (protegida).
-    Retorna o número de parágrafos processados.
     """
     processed = 0
     in_references = False
 
-    # Processar corpo principal
     for para in doc.paragraphs:
         if _is_references_heading(para):
             in_references = True
@@ -467,7 +417,6 @@ def correct_si_units(doc: Document) -> int:
         _process_paragraph(para)
         processed += 1
 
-    # Processar cabeçalhos e rodapés de todas as seções
     for section in doc.sections:
         for header_footer in [
             section.header, section.footer,
@@ -481,7 +430,6 @@ def correct_si_units(doc: Document) -> int:
             except Exception:
                 pass
 
-    # Processar tabelas (corpo principal, antes de Referências)
     in_references = False
     for table in doc.tables:
         for row in table.rows:
